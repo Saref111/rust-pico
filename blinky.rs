@@ -11,7 +11,8 @@
 extern crate panic_halt;
 extern crate embedded_hal;
 extern crate rp2040_hal;
-
+extern crate core as rust_core;
+extern crate critical_section;
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
@@ -21,10 +22,13 @@ use rp2040_hal as hal;
 
 // A shorter alias for the Peripheral Access Crate, which provides low-level
 // register access
-use hal::pac;
+
+use hal::{pac, gpio::Interrupt};
+use rust_core::cell::RefCell;
+use critical_section::Mutex;
 
 // Some traits we need
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::{OutputPin, InputPin};
 use rp2040_hal::clocks::Clock;
 
 /// The linker will place this boot block at the start of our program image. We
@@ -35,9 +39,17 @@ use rp2040_hal::clocks::Clock;
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
-/// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz. Adjust
-/// if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
+type RedLedPin = hal::gpio::Pin<hal::gpio::bank0::Gpio13, hal::gpio::FunctionSioOutput, hal::gpio::PullNone>;
+type YellowLedPin = hal::gpio::Pin<hal::gpio::bank0::Gpio12, hal::gpio::FunctionSioOutput, hal::gpio::PullNone>;
+type GreenLedPin = hal::gpio::Pin<hal::gpio::bank0::Gpio11, hal::gpio::FunctionSioOutput, hal::gpio::PullNone>;
+
+type ButtonPin = hal::gpio::Pin<hal::gpio::bank0::Gpio14, hal::gpio::FunctionSioInput, hal::gpio::PullUp>;
+
+type LedsAndButton = (RedLedPin, YellowLedPin, GreenLedPin, ButtonPin);
+
+static GLOBAL_PINS: Mutex<RefCell<Option<LedsAndButton>>> = Mutex::new(RefCell::new(None));
 
 #[rp2040_hal::entry]
 fn main() -> ! {
@@ -74,13 +86,21 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // Configure GPIO25 as an output
-    let mut led_pin = pins.gpio15.into_push_pull_output();
-    loop {
-        led_pin.set_high().unwrap();
-        delay.delay_ms(100);
-        led_pin.set_low().unwrap();
-        delay.delay_ms(100);
+    // Set high all pins exept 3
+    let mut button = pins.gpio14.reconfigure();
+    let mut green_led = pins.gpio11.reconfigure();
+    let mut yellow_led = pins.gpio12.reconfigure();
+    let mut red_led = pins.gpio13.reconfigure();
+    let mut state = 0;
+
+    button.set_interrupt_enabled(Interrupt::EdgeLow, true);
+
+    critical_section::with(|cs| {
+        GLOBAL_PINS.borrow(cs).replace(Some((red_led, yellow_led, green_led, button)));
+    });
+
+    loop {   
+        
     }
 }
 
