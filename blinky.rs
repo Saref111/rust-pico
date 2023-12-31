@@ -23,12 +23,13 @@ use rp2040_hal as hal;
 // A shorter alias for the Peripheral Access Crate, which provides low-level
 // register access
 
-use hal::{pac, gpio::Interrupt};
+use hal::{pac, gpio::Interrupt as InterruptEnum};
 use rust_core::cell::RefCell;
+use hal::pac::interrupt;
 use critical_section::Mutex;
 
 // Some traits we need
-use embedded_hal::digital::v2::{OutputPin, InputPin};
+use embedded_hal::digital::v2::{OutputPin, InputPin, ToggleableOutputPin};
 use rp2040_hal::clocks::Clock;
 
 /// The linker will place this boot block at the start of our program image. We
@@ -93,15 +94,49 @@ fn main() -> ! {
     let mut red_led = pins.gpio13.reconfigure();
     let mut state = 0;
 
-    button.set_interrupt_enabled(Interrupt::EdgeLow, true);
+    button.set_interrupt_enabled(InterruptEnum::EdgeLow, true);
 
     critical_section::with(|cs| {
         GLOBAL_PINS.borrow(cs).replace(Some((red_led, yellow_led, green_led, button)));
     });
 
+    unsafe {
+        pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+    }
+
     loop {   
-        
+        cortex_m::asm::wfi();
     }
 }
 
-// End of file
+#[interrupt]
+fn IO_IRQ_BANK0() {
+    static mut LEDS_AND_BUTTON: Option<LedsAndButton> = None;
+
+    if LEDS_AND_BUTTON.is_none() {
+        critical_section::with(|cs| {
+            *LEDS_AND_BUTTON = GLOBAL_PINS.borrow(cs).take();
+        });
+    }
+
+    if let Some(gpios) = LEDS_AND_BUTTON {
+        let (
+            red_led, 
+            yellow_led, 
+            green_led, 
+            button
+        ) = (&mut gpios.0, &mut gpios.1, &mut gpios.2, &mut gpios.3);
+
+        if button.interrupt_status(InterruptEnum::EdgeLow) {
+            // toggle can't fail, but the embedded-hal traits always allow for it
+            // we can discard the return value by assigning it to an unnamed variable
+            let _ = red_led.toggle();
+            let _ = yellow_led.toggle();
+            let _ = green_led.toggle();
+
+            // Our interrupt doesn't clear itself.
+            // Do that now so we don't immediately jump back to this interrupt handler.
+            button.clear_interrupt(InterruptEnum::EdgeLow);
+        }
+    }
+}
